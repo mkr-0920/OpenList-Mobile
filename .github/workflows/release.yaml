@@ -30,17 +30,12 @@ jobs:
 
       - name: Prepare Go Core and Multi-thread Support
         run: |
-          # 1. 运行脚本拉取后端 (mkr-0920/OpenList)
           cd $GITHUB_WORKSPACE/openlist-lib/scripts
           chmod +x *.sh
           ./init_openlist.sh
-          
-          # 2. 修复依赖
           cd $GITHUB_WORKSPACE/openlist-lib
           go mod tidy
           go mod download
-          
-          # 3. 显式注入 bind 包
           go get golang.org/x/mobile/bind
 
       - name: Build Android AAR (Go Core)
@@ -49,12 +44,9 @@ jobs:
           OPENLIST_GIT_COMMIT=$(git rev-parse --short HEAD)
           OPENLIST_VERSION=$(cat openlist_version)
           OPENLIST_WEB_VERSION="4.2.1"
-          
           ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$OPENLIST_BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$OPENLIST_GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$OPENLIST_VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$OPENLIST_WEB_VERSION'"
-          
           mkdir -p $GITHUB_WORKSPACE/android/app/libs
           cd $GITHUB_WORKSPACE/openlist-lib/openlistlib
-          echo "Building AAR..."
           gomobile bind -ldflags "$ldflags" -v -androidapi 21 -o $GITHUB_WORKSPACE/android/app/libs/openlistlib.aar .
 
       - uses: actions/setup-java@v4
@@ -65,25 +57,36 @@ jobs:
       - name: Setup Gradle
         uses: gradle/gradle-build-action@v3
 
+      - name: Init Signature
+        run: |
+          touch local.properties
+          cd android
+          echo ALIAS_NAME='${{ secrets.ALIAS_NAME }}' >> local.properties
+          echo ALIAS_PASSWORD='${{ secrets.ALIAS_PASSWORD }}' >> local.properties
+          echo KEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' >> local.properties
+          echo KEY_PATH='./key.jks' >> local.properties
+          # 使用你填写的 KEY_STORE Secret 还原 JKS 文件
+          echo "${{ secrets.KEY_STORE }}" | base64 --decode > $GITHUB_WORKSPACE/android/app/key.jks
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.32.7'
           
-      - name: Build APK (Debug Mode to skip signing)
+      - name: Build APK (Release Mode)
         run: |
-          # 使用 debug 模式，无需密钥即可完成打包
-          flutter build apk --split-per-abi --debug
+          # 编译正式版
+          flutter build apk --split-per-abi --release
 
       - name: Upload Android APKs
         uses: actions/upload-artifact@v4
         with:
-          name: "android-debug-apks"
+          name: "android-release-apks"
           path: "build/app/outputs/flutter-apk/*.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          name: "OpenList-MultiThread-Test"
+          name: "OpenList-MultiThread-Release"
           tag_name: "v-${{ github.run_number }}"
           files: build/app/outputs/flutter-apk/*.apk
         env:
