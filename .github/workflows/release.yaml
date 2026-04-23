@@ -95,7 +95,10 @@ jobs:
           OPENLIST_VERSION: ${{ needs.version.outputs.openlist_version }}
           OPENLIST_WEB_VERSION: ${{ needs.version.outputs.openlist_web_version }}
         run: |
-          cd $GITHUB_WORKSPACE/openlist-lib/scripts
+          cd $GITHUB_WORKSPACE/openlist-lib
+          go mod tidy
+          cd scripts
+          chmod +x gobind.sh
           ./gobind.sh
 
       - uses: actions/setup-java@v4
