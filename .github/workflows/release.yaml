@@ -7,66 +7,9 @@ permissions:
   contents: write
 
 jobs:
-  version:
-    name: Get OpenList Version Information
-    runs-on: ubuntu-latest
-    outputs:
-      version_name: ${{ steps.generate.outputs.version_name }}
-      openlist_version: ${{ steps.openlist_version.outputs.openlist_version }}
-      openlist_git_commit: ${{ steps.openlist_version.outputs.openlist_git_commit }}
-      openlist_web_version: ${{ steps.openlist_version.outputs.openlist_web_version }}
-      openlist_built_at: ${{ steps.openlist_version.outputs.openlist_built_at }}
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Generate Version Name
-        id: generate
-        run: |
-          # Generate unified version with timestamp for entire workflow
-          BASE_VERSION=$(cat openlist_version)
-          TIMESTAMP=$(date +%y%m%d%H)
-          VERSION_NAME="${BASE_VERSION}.${TIMESTAMP}"
-          echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
-
-      - name: Download OpenList Source Code
-        run: |
-          cd $GITHUB_WORKSPACE/openlist-lib/scripts
-          chmod +x *.sh
-          ./init_openlist.sh
-
-      - name: Extract OpenList Version Info
-        id: openlist_version
-        run: |
-          # After init_openlist.sh, OpenList backend source is in openlist-lib/ with .git directory removed
-          # We need to get version info from the latest remote tag that was cloned
-          cd $GITHUB_WORKSPACE/openlist-lib/scripts
-          
-          # Re-fetch the tag information from remote (since .git was removed by init_openlist.sh)
-          GIT_REPO="https://github.com/OpenListTeam/OpenList.git"
-          OPENLIST_VERSION=$(git -c 'versionsort.suffix=-' ls-remote --exit-code --refs --sort='version:refname' --tags $GIT_REPO | tail -n 1 | cut -d'/' -f3)
-          
-          # Get the commit hash for this tag from remote
-          OPENLIST_GIT_COMMIT=$(git ls-remote $GIT_REPO "refs/tags/${OPENLIST_VERSION}" | cut -f1 | cut -c1-7)
-          
-          # Get frontend version from OpenList-Frontend latest release
-          OPENLIST_WEB_VERSION=$(curl -fsSL --max-time 10 "https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/"//g;s/,//g;s/ //g' || echo "rolling")
-          
-          # Build timestamp
-          OPENLIST_BUILT_AT=$(date +'%F %T %z')
-          
-          echo "openlist_version=${OPENLIST_VERSION}" >> $GITHUB_OUTPUT
-          echo "openlist_git_commit=${OPENLIST_GIT_COMMIT}" >> $GITHUB_OUTPUT
-          echo "openlist_web_version=${OPENLIST_WEB_VERSION}" >> $GITHUB_OUTPUT
-          echo "openlist_built_at=${OPENLIST_BUILT_AT}" >> $GITHUB_OUTPUT
-
-  android:
+  build:
     name: Build OpenList Android APK
-    needs: [version]
     runs-on: ubuntu-latest
-    env:
-      output: "${{ github.workspace }}/build/app/outputs/apk/release"
     steps:
       - uses: actions/checkout@v3
         with:
@@ -77,29 +20,42 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Install Gomobile
+      - name: Install Gomobile and Bind
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           gomobile init
 
-      - name: Download OpenList Source Code
+      - name: Prepare Go Core and Multi-thread Support
         run: |
+          # 1. 运行你修改过的脚本拉取后端 (mkr-0920/OpenList)
           cd $GITHUB_WORKSPACE/openlist-lib/scripts
           chmod +x *.sh
           ./init_openlist.sh
-
-      - name: Build OpenList Android AAR
-        env:
-          OPENLIST_BUILT_AT: ${{ needs.version.outputs.openlist_built_at }}
-          OPENLIST_GIT_COMMIT: ${{ needs.version.outputs.openlist_git_commit }}
-          OPENLIST_VERSION: ${{ needs.version.outputs.openlist_version }}
-          OPENLIST_WEB_VERSION: ${{ needs.version.outputs.openlist_web_version }}
-        run: |
+          
+          # 2. 在后端源码根目录修复所有依赖
           cd $GITHUB_WORKSPACE/openlist-lib
           go mod tidy
-          cd scripts
-          chmod +x gobind.sh
-          ./gobind.sh
+          go mod download
+          
+          # 3. 核心修复：显式将 bind 注入依赖树，解决 gomobile 报错
+          go get golang.org/x/mobile/bind
+
+      - name: Build Android AAR (Go Core)
+        run: |
+          # 注入编译元数据
+          OPENLIST_BUILT_AT=$(date +'%F %T %z')
+          OPENLIST_GIT_COMMIT=$(git rev-parse --short HEAD)
+          OPENLIST_VERSION=$(cat openlist_version)
+          OPENLIST_WEB_VERSION="4.2.1"
+          
+          ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$OPENLIST_BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$OPENLIST_GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$OPENLIST_VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$OPENLIST_WEB_VERSION'"
+          
+          # 进入 gobind 目录执行编译
+          cd $GITHUB_WORKSPACE/openlist-lib/openlistlib
+          gomobile bind -ldflags "$ldflags" -v -androidapi 21 -o $GITHUB_WORKSPACE/android/app/libs/openlistlib.aar .
 
       - uses: actions/setup-java@v4
         with:
@@ -117,140 +73,30 @@ jobs:
           echo ALIAS_PASSWORD='${{ secrets.ALIAS_PASSWORD }}' >> local.properties
           echo KEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' >> local.properties
           echo KEY_PATH='./key.jks' >> local.properties
-          # 从Secrets读取无换行符Base64解码, 然后保存到到app/key.jks
-          echo ${{ secrets.KEY_STORE }} | base64 --decode > $GITHUB_WORKSPACE/android/app/key.jks
+          if [ "${{ secrets.KEY_STORE }}" != "" ]; then
+            echo "${{ secrets.KEY_STORE }}" | base64 --decode > $GITHUB_WORKSPACE/android/app/key.jks
+          fi
 
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.32.7'
           
-      - name: Build APK with Version
-        env:
-          BUILD_VERSION_NAME: ${{ needs.version.outputs.version_name }}
-        run: flutter build apk --split-per-abi --release
+      - name: Build APK
+        run: |
+          # 编译所有架构的 APK
+          flutter build apk --split-per-abi --release
 
-      - name: Upload missing_rules.txt
-        if: failure()
+      - name: Upload Android APKs
         uses: actions/upload-artifact@v4
         with:
-          name: "missing_rules"
-          path: "${{ github.workspace }}/build/app/outputs/mapping/release/missing_rules.txt"
+          name: "android-release-apks"
+          path: "build/app/outputs/apk/release/*.apk"
 
-      - name: Upload Android APKs for Release
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
         with:
-          name: "android-release-files"
-          path: "${{ env.output }}/*.apk"
-
-  # ios:
-  #   name: Build OpenList iOS App
-  #   needs: [version]
-  #   runs-on: macos-latest
-  #   env:
-  #     output: "${{ github.workspace }}/build/ios/ipa"
-  #   steps:
-  #      - uses: actions/checkout@v3
-  #        with:
-  #          fetch-depth: 0
-  #
-  #      - name: Download OpenList iOS Framework from latest build
-  #        uses: dawidd6/action-download-artifact@v6
-  #        with:
-  #          workflow: sync_openlist.yaml
-  #          name: openlist-ios-xcframework
-  #          path: ${{ github.workspace }}/ios/Frameworks/
-  #          check_artifacts: true
-  #          search_artifacts: true
-
-  #     - uses: subosito/flutter-action@v2
-  #       with:
-  #         flutter-version: '3.32.7'
-
-  #     - name: Build iOS App
-  #       env:
-  #         BUILD_VERSION_NAME: ${{ needs.version.outputs.version_name }}
-  #       run: |
-  #         flutter build ios --release --no-codesign
-
-  #     - name: Create IPA
-  #       run: |
-  #         mkdir -p ${{ env.output }}
-  #         cd build/ios/iphoneos
-  #         mkdir Payload
-  #         cp -r Runner.app Payload/
-  #         zip -r ${{ env.output }}/OpenList-Mobile.ipa Payload/
-
-  #     - name: Upload iOS IPA for Release
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: "ios-release-files"
-  #         path: "${{ env.output }}/OpenList-Mobile.ipa"
-
-  release:
-    name: Create GitHub Release
-    needs: [version, android] # Add ios when iOS build is enabled: [version, android, ios]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Prepare changelog generation
-        id: prepare_changelog
-        run: |
-          git tag -d rolling 2>/dev/null || true
-          PRE_RELEASE_TAGS=$(git tag -l | grep -E "(-|\+)" || true)
-          if [ -n "$PRE_RELEASE_TAGS" ]; then
-            echo "$PRE_RELEASE_TAGS" | xargs -r git tag -d
-          fi
-
-      - name: Generate changelog
-        id: generate_changelog
-        run: |
-          npx changelogithub --output ${{ github.workspace }}/GENERATED_CHANGELOG.txt || echo "" > ${{ github.workspace }}/GENERATED_CHANGELOG.txt
-
-      - name: Create final changelog
-        id: create_changelog
-        run: |
-          echo "[Auto Sync OpenList] ${{ needs.version.outputs.openlist_version }}" > ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          echo "" >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          echo "**OpenList Backend:** ${{ needs.version.outputs.openlist_version }} (${{ needs.version.outputs.openlist_git_commit }})" >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          echo "**OpenList Frontend:** ${{ needs.version.outputs.openlist_web_version }}" >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          echo "**Built at:** ${{ needs.version.outputs.openlist_built_at }}" >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          echo "" >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          echo "---" >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          echo "" >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-
-          if [ -s "${{ github.workspace }}/GENERATED_CHANGELOG.txt" ]; then
-            cat ${{ github.workspace }}/GENERATED_CHANGELOG.txt >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          else
-            echo "No changes in this release." >> ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          fi
-
-      - name: Download Android artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: android-release-files
-          path: release_files/
-
-      # - name: Download iOS artifacts
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: ios-release-files
-      #     path: release_files/
-
-      - uses: softprops/action-gh-release@v1
-        with:
-          name: ${{ needs.version.outputs.version_name }}
-          tag_name: ${{ needs.version.outputs.version_name }}
-          body_path: ${{ github.workspace }}/FINAL_CHANGELOG.txt
-          draft: false
-          prerelease: false
-          files: release_files/*
+          name: "Manual-Build-${{ github.run_number }}"
+          tag_name: "build-${{ github.run_number }}"
+          files: build/app/outputs/apk/release/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
