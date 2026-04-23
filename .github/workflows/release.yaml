@@ -53,8 +53,12 @@ jobs:
           
           ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$OPENLIST_BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$OPENLIST_GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$OPENLIST_VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$OPENLIST_WEB_VERSION'"
           
+          # 核心修复：手动创建输出目录，防止 gomobile 报错
+          mkdir -p $GITHUB_WORKSPACE/android/app/libs
+          
           # 进入 gobind 目录执行编译
           cd $GITHUB_WORKSPACE/openlist-lib/openlistlib
+          echo "Building AAR..."
           gomobile bind -ldflags "$ldflags" -v -androidapi 21 -o $GITHUB_WORKSPACE/android/app/libs/openlistlib.aar .
 
       - uses: actions/setup-java@v4
