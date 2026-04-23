@@ -52,6 +52,10 @@ else
 fi
 
 echo "Current directory: $(pwd)"
+echo "Tidying and downloading dependencies..."
+go mod tidy
+go mod download
+
 echo "Building OpenList for Android..."
 
 # Check if this directory has Go files suitable for binding
