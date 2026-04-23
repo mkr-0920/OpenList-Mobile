@@ -30,22 +30,21 @@ jobs:
 
       - name: Prepare Go Core and Multi-thread Support
         run: |
-          # 1. 运行你修改过的脚本拉取后端 (mkr-0920/OpenList)
+          # 1. 运行脚本拉取后端 (mkr-0920/OpenList)
           cd $GITHUB_WORKSPACE/openlist-lib/scripts
           chmod +x *.sh
           ./init_openlist.sh
           
-          # 2. 在后端源码根目录修复所有依赖
+          # 2. 修复依赖
           cd $GITHUB_WORKSPACE/openlist-lib
           go mod tidy
           go mod download
           
-          # 3. 核心修复：显式将 bind 注入依赖树，解决 gomobile 报错
+          # 3. 显式注入 bind 包
           go get golang.org/x/mobile/bind
 
       - name: Build Android AAR (Go Core)
         run: |
-          # 注入编译元数据
           OPENLIST_BUILT_AT=$(date +'%F %T %z')
           OPENLIST_GIT_COMMIT=$(git rev-parse --short HEAD)
           OPENLIST_VERSION=$(cat openlist_version)
@@ -53,10 +52,7 @@ jobs:
           
           ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$OPENLIST_BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$OPENLIST_GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$OPENLIST_VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$OPENLIST_WEB_VERSION'"
           
-          # 核心修复：手动创建输出目录，防止 gomobile 报错
           mkdir -p $GITHUB_WORKSPACE/android/app/libs
-          
-          # 进入 gobind 目录执行编译
           cd $GITHUB_WORKSPACE/openlist-lib/openlistlib
           echo "Building AAR..."
           gomobile bind -ldflags "$ldflags" -v -androidapi 21 -o $GITHUB_WORKSPACE/android/app/libs/openlistlib.aar .
@@ -69,38 +65,26 @@ jobs:
       - name: Setup Gradle
         uses: gradle/gradle-build-action@v3
 
-      - name: Init Signature
-        run: |
-          touch local.properties
-          cd android
-          echo ALIAS_NAME='${{ secrets.ALIAS_NAME }}' >> local.properties
-          echo ALIAS_PASSWORD='${{ secrets.ALIAS_PASSWORD }}' >> local.properties
-          echo KEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' >> local.properties
-          echo KEY_PATH='./key.jks' >> local.properties
-          if [ "${{ secrets.KEY_STORE }}" != "" ]; then
-            echo "${{ secrets.KEY_STORE }}" | base64 --decode > $GITHUB_WORKSPACE/android/app/key.jks
-          fi
-
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.32.7'
           
-      - name: Build APK
+      - name: Build APK (Debug Mode to skip signing)
         run: |
-          # 编译所有架构的 APK
-          flutter build apk --split-per-abi --release
+          # 使用 debug 模式，无需密钥即可完成打包
+          flutter build apk --split-per-abi --debug
 
       - name: Upload Android APKs
         uses: actions/upload-artifact@v4
         with:
-          name: "android-release-apks"
-          path: "build/app/outputs/apk/release/*.apk"
+          name: "android-debug-apks"
+          path: "build/app/outputs/apk/debug/*.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          name: "Manual-Build-${{ github.run_number }}"
-          tag_name: "build-${{ github.run_number }}"
-          files: build/app/outputs/apk/release/*.apk
+          name: "OpenList-MultiThread-Test"
+          tag_name: "v-${{ github.run_number }}"
+          files: build/app/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
