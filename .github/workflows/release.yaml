@@ -78,13 +78,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: "android-debug-apks"
-          path: "build/app/outputs/apk/debug/*.apk"
+          path: "build/app/outputs/flutter-apk/*.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           name: "OpenList-MultiThread-Test"
           tag_name: "v-${{ github.run_number }}"
-          files: build/app/outputs/apk/debug/*.apk
+          files: build/app/outputs/flutter-apk/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
